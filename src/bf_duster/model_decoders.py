@@ -1,5 +1,6 @@
 from bf_duster.models import TradingPair, Ticker, Wallet
 from bf_duster.symbol_parsers import parse_pair, parse_ticker_symbol
+from decimal import Decimal
 
 
 def decode_wallet(wallet_data) -> Wallet:
@@ -9,7 +10,7 @@ def decode_wallet(wallet_data) -> Wallet:
     return Wallet(
         type=wallet_data[0],
         currency=wallet_data[1],
-        balance_available=wallet_data[4],
+        balance_available=Decimal(wallet_data[4]),
     )
 
 
@@ -25,8 +26,8 @@ def decode_pair(pair_data) -> TradingPair:
         symbol=symbol,
         base=base,
         quote=quote,
-        min_order_size=min_order_size,
-        max_order_size=max_order_size
+        min_order_size=Decimal(str(min_order_size)),
+        max_order_size=Decimal(str(max_order_size))
     )
 
 
@@ -40,5 +41,5 @@ def decode_ticker(d: list) -> Ticker:
         symbol=symbol,
         base=base,
         quote=quote,
-        last_price=d[7],
+        last_price=Decimal(str(d[7])),
     )

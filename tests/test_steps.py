@@ -1,81 +1,51 @@
-from bf_duster.models import Wallet, Ticker, TradingPair
-from bf_duster.steps import _create_sell_transaction, _create_buy_transaction, _create_order_transaction
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
 
-def test_create_sell_transaction():
+from bf_duster.models import Wallet, PricedPair
+from bf_duster.steps import _create_sell_transaction, _create_buy_transaction, _create_order_transaction
 
-    w = Wallet(
-        type="exchange",
-        currency="BTC",
-        balance_available=1.0,
-    )
 
-    pair = TradingPair(
-        symbol="tBTCUSD",
+@pytest.fixture
+def priced_pair():
+    return PricedPair(
+        symbol="BTCUSD",
         base="BTC",
         quote="USD",
         min_order_size=0.006,
         max_order_size=100.0,
-    )
-
-    ticker = Ticker(
-        symbol="tBTCUSD",
-        base="BTC",
-        quote="USD",
         last_price=27000.0,
     )
 
-    t = _create_sell_transaction(w, pair, ticker)
+
+def test_create_sell_transaction(priced_pair):
+    t = _create_sell_transaction(wallet_currency="BTC", balance_available=Decimal(2), pair=priced_pair)
 
     assert t.type == "EXCHANGE MARKET"
     assert t.trading_symbol == "tbtcusd"
-    assert t.amount == -1.0
+    assert t.amount == -2
     assert t.success is False
     assert t.message is None
 
-    w.balance_available = 0.005
-    t = _create_sell_transaction(w, pair, ticker)
-
+    t = _create_sell_transaction(wallet_currency="BTC", balance_available=Decimal(0.001), pair=priced_pair)
     assert t is None, "Should not be able to create a sell order with less than min order size"
 
 
-def test_create_buy_transaction():
-
-    pair = TradingPair(
-        symbol="tBTCUSD",
-        base="BTC",
-        quote="USD",
-        min_order_size=0.006,
-        max_order_size=100.0,
-    )
-
-    ticker = Ticker(
-        symbol="tBTCUSD",
-        base="BTC",
-        quote="USD",
-        last_price=27000.0,
-    )
-
-    w = Wallet(
-        type="exchange",
-        currency="USD",
-        balance_available=27000.0,
-    )
-
-    t = _create_buy_transaction(w, pair, ticker)
+def test_create_buy_transaction(priced_pair):
+    t = _create_buy_transaction(wallet_currency="USD", balance_available=Decimal(1000), pair=priced_pair)
 
     assert t.type == "EXCHANGE MARKET"
     assert t.trading_symbol == "tbtcusd"
+    assert t.amount.compare(Decimal('0.037'))
     assert t.success is False
     assert t.message is None
 
-    w.balance_available = 10
-    t = _create_buy_transaction(w, pair, ticker)
+    t = _create_buy_transaction(wallet_currency="USD", balance_available=Decimal(1), pair=priced_pair)
     assert t is None, "Should not be able to create a buy order with less than min order size"
 
 
-def test_create_order_transaction():
+def test_create_order_transaction(priced_pair):
     w = Wallet(
         type="exchange",
         currency="USD",
@@ -83,20 +53,8 @@ def test_create_order_transaction():
     )
     market_index = MagicMock()
     market_index.find_pairs.return_value = [
-        TradingPair(
-            symbol="tBTCUSD",
-            base="BTC",
-            quote="USD",
-            min_order_size=0.006,
-            max_order_size=100.0,
-        ),
+        priced_pair
     ]
-    market_index.get_ticker.return_value = Ticker(
-        symbol="tBTCUSD",
-        base="BTC",
-        quote="USD",
-        last_price=27000.0,
-    )
 
     with patch("bf_duster.steps._create_buy_transaction") as mock_create_buy, \
             patch("bf_duster.steps._create_sell_transaction") as mock_create_sell:

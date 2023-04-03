@@ -1,76 +1,45 @@
 import logging
+from decimal import Decimal
 
 from bf_duster.errors import RepoException
-from bf_duster.models import TradingPair, FundsTransferTransaction, CreateOrderTransaction
-from bf_duster.models import Wallet, Ticker
+from bf_duster.market import MarketIndex, build_market_index
+from bf_duster.models import FundsTransferTransaction, CreateOrderTransaction, PricedPair
+from bf_duster.models import Wallet
+from bf_duster.output import format_create_order_transaction, format_funds_transfer_transaction
 from bf_duster.repo import IRepo
-from bf_duster.symbol_parsers import parse_ticker_symbol
 
 _logger = logging.getLogger(__name__)
 
 
-class MarketIndex:
-    """
-    Indexes trading pairs by base and counter currencies and provides ticker data.
-    """
-
-    def __init__(self, pairs: list[TradingPair], tickers: list[Ticker]):
-        self._base = dict()
-        self._quote = dict()
-        self._tickers = {t.symbol: t for t in tickers}
-        for p in pairs:
-            self._base.setdefault(p.base, {}).setdefault(p.quote, p)
-            self._quote.setdefault(p.quote, {}).setdefault(p.base, p)
-
-    def get_pair_by_ticker_symbol(self, ticker_symbol: str) -> TradingPair | None:
-        base, quote = parse_ticker_symbol(ticker_symbol.lower())
-        return self._base.get(base, {}).get(quote, None)
-
-    def find_pairs(self, from_currency: str, to_currency: str) -> list[TradingPair]:
-        """
-        Find trading pairs that can be used to convert from one currency to another.
-        """
-        from_currency = from_currency.lower()
-        to_currency = to_currency.lower()
-        result = []
-        r = self._base.get(from_currency, {}).get(to_currency, None)
-        if r:
-            result.append(r)
-        r = self._quote.get(from_currency, {}).get(to_currency, None)
-        if r:
-            result.append(r)
-        return result
-
-    def get_ticker(self, symbol: str) -> Ticker | None:
-        return self._tickers.get(symbol, None)
-
-
-def process_all(repo: IRepo):
+def process_all(repo: IRepo, max_value_usd: Decimal = Decimal('10')):
     """
     Move all funds from margin wallets to exchange wallets and then try to convert dust to btc either by converting
     directly to btc or by converting to usd first and then to btc.
     """
     margin_wallet_transactions = _process_margin_wallets(repo)
     for t in margin_wallet_transactions:
-        print(t)
+        _logger.info(
+            "Wallet transfer %s %s -> %s %s. Amount: %.6f. Success: %s. Message: %s",
+            t.wallet_from, t.currency_from, t.wallet_to, t.currency_to, t.amount, t.success, t.message
+        )
+        print(format_funds_transfer_transaction(t))
 
     tickers = repo.get_tickers()
     trading_pairs = repo.get_trading_pairs()
-    trading_pair_index = MarketIndex(trading_pairs, tickers)
+    trading_pair_index = build_market_index(trading_pairs, tickers)
 
     # attempt to convert dust to btc or if that fails, to usd
     ignored_currencies = ['btc', 'usd']
     target_currencies = ['btc', 'usd']
-    dust_transactions = _process_exchange_dust(repo, trading_pair_index, ignored_currencies, target_currencies)
+    dust_transactions = _process_exchange_dust(
+        repo, trading_pair_index, max_value_usd, ignored_currencies, target_currencies
+    )
 
-    usd_wallet = None
-    for w in repo.get_wallets():
-        if w.currency == 'usd':
-            usd_wallet = w
-            break
+    usd_tables = {'usd', 'ust'}
+    usd_wallets = [w for w in repo.get_wallets() if w.currency in usd_tables]
 
-    final_transaction = _create_order_transaction(usd_wallet, 'btc', pair_index=trading_pair_index)
-    final_transactions = _process_create_order_transactions(repo, [final_transaction])
+    final_transactions = [_create_order_transaction(w, 'btc', pair_index=trading_pair_index) for w in usd_wallets]
+    final_transactions = _process_create_order_transactions(repo, final_transactions)
 
     dust_transactions.extend(final_transactions)
 
@@ -84,6 +53,7 @@ def process_all(repo: IRepo):
             result,
             t.message
         )
+        print(format_create_order_transaction(t))
 
 
 def _process_margin_wallets(repo: IRepo) -> list[FundsTransferTransaction]:
@@ -124,6 +94,7 @@ def _create_margin_to_exchange_transactions(wallets: list[Wallet]) -> list[Funds
 def _process_exchange_dust(
         repo: IRepo,
         pair_index: MarketIndex,
+        max_value_usd: Decimal,
         ignored_currencies: list[str],
         target_currencies: list[str]
 ) -> list[CreateOrderTransaction]:
@@ -131,7 +102,9 @@ def _process_exchange_dust(
     Create dust transactions and process them. Return a list of attempted transactions.
     """
     wallets = repo.get_wallets()
-    dust_transactions = _create_dust_transactions(wallets, pair_index, ignored_currencies, target_currencies)
+    dust_transactions = _create_dust_transactions(
+        wallets, pair_index, max_value_usd, ignored_currencies, target_currencies
+    )
     return _process_create_order_transactions(repo, dust_transactions)
 
 
@@ -156,6 +129,7 @@ def _process_create_order_transactions(
 def _create_dust_transactions(
         wallets: list[Wallet],
         trading_pair_index: MarketIndex,
+        max_value_usd: Decimal,
         ignored_currencies: list[str] = None,
         target_currencies: list[str] = None,
 ) -> list[CreateOrderTransaction]:
@@ -164,7 +138,6 @@ def _create_dust_transactions(
     currency from the list of target_currencies.
     """
     wallets = [w for w in wallets if w.type == 'exchange']
-
     wallets = [w for w in wallets if w.currency not in ignored_currencies]
 
     transactions = []
@@ -173,6 +146,20 @@ def _create_dust_transactions(
         if w.balance_available == 0:
             continue
 
+        coin_in_usd = trading_pair_index.get_value_of(w.currency, 'usd', 'btc')
+        if coin_in_usd is None:
+            _logger.debug("Skipping %s because it can not be priced in usd", w.currency)
+            continue
+
+        wallet_value_in_usd = coin_in_usd * w.balance_available
+        if wallet_value_in_usd > max_value_usd:
+            _logger.info(
+                "Skipping %s. Max value is $%.6f. Wallet value is $%.6f (%.6f %s)",
+                w.currency, max_value_usd, wallet_value_in_usd, w.balance_available, w.currency
+            )
+            continue
+
+        # attempt to convert to one of the target currencies
         for to_currency in [c for c in target_currencies if c != w.currency]:
             transaction = _create_order_transaction(w, to_currency, trading_pair_index)
             if transaction:
@@ -195,56 +182,56 @@ def _create_order_transaction(
         return
 
     pair = usable_pairs[0]
-    ticker = pair_index.get_ticker(f"t{pair.symbol}")
-    if ticker is None:
-        _logger.warning("No ticker for %s", pair.symbol)
-        return
 
     _logger.debug("Exchanging %s -> %s using pair %s", w.currency, to_currency, pair.symbol)
 
     if w.currency == pair.quote:
-        return _create_buy_transaction(w, pair, ticker)
+        return _create_buy_transaction(w.currency, w.balance_available, pair)
     else:
-        return _create_sell_transaction(w, pair, ticker)
+        return _create_sell_transaction(w.currency, w.balance_available, pair)
 
 
 def _create_buy_transaction(
-        w: Wallet, pair: TradingPair, ticker: Ticker
+        wallet_currency: str,
+        balance_available: Decimal,
+        pair: PricedPair
 ) -> CreateOrderTransaction | None:
     """
     Create a buy order transaction for a wallet and a target currency using a trading pair.
     """
-    order_size = w.balance_available / ticker.last_price
+    order_size = balance_available / pair.last_price
     if order_size < pair.min_order_size:
-        _logger.info(
+        _logger.debug(
             "Cannot create BUY order for %s. Minimum order size is %s %s and available "
             "balance of %s %s only allows to buy %.9f %s",
-            ticker.symbol, pair.min_order_size, ticker.symbol, w.balance_available,
-            w.currency, order_size, ticker.symbol
+            pair.symbol, pair.min_order_size, pair.symbol, balance_available,
+            wallet_currency, order_size, pair.symbol
         )
         return
     return CreateOrderTransaction(
         type='EXCHANGE MARKET',
-        trading_symbol=ticker.symbol,
+        trading_symbol=f"t{pair.symbol}",
         amount=order_size,
     )
 
 
 def _create_sell_transaction(
-        w: Wallet, pair: TradingPair, ticker: Ticker
+        wallet_currency: str,
+        balance_available: Decimal,
+        pair: PricedPair
 ) -> CreateOrderTransaction | None:
     """
     Create a sell order transaction for a wallet and a target currency using a trading pair.
     """
-    if w.balance_available < pair.min_order_size:
-        _logger.info(
+    if balance_available < pair.min_order_size:
+        _logger.debug(
             "Cannot create SELL order for %s. Minimum order size is %s %s and available "
             "balance is %s %s",
-            w.currency, pair.min_order_size, ticker.symbol, w.balance_available, w.currency
+            wallet_currency, pair.min_order_size, pair.symbol, balance_available, wallet_currency
         )
         return
     return CreateOrderTransaction(
         type='EXCHANGE MARKET',
-        trading_symbol=ticker.symbol,
-        amount=w.balance_available * -1,
+        trading_symbol=f"t{pair.symbol}",
+        amount=balance_available * -1,
     )
