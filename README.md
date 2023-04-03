@@ -40,7 +40,7 @@ poetry run bf-duster --max-value-usd 20
 ## To Do
 - [ ] Add support for converting to other currencies
 - [X] Add support for converting only from wallets below a certain threshold
-- [X] Add more testing
+- [ ] Add more testing
 
 ## Disclaimer
 It is important to note that the use of this program is at your own risk. The author of this program is not responsible for any damages or losses that may occur as a result of using this program. By using this program, you agree to hold the author harmless from any liability or damages that may arise from its use. It is recommended that you thoroughly review and understand the code before using it, and use it in a test environment before using it in a production environment.
