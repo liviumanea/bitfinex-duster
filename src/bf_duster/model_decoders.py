@@ -1,6 +1,7 @@
+from decimal import Decimal
+
 from bf_duster.models import TradingPair, Ticker, Wallet
 from bf_duster.symbol_parsers import parse_pair, parse_ticker_symbol
-from decimal import Decimal
 
 
 def decode_wallet(wallet_data) -> Wallet:

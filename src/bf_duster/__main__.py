@@ -1,17 +1,16 @@
 import logging
+from argparse import ArgumentParser
+from decimal import Decimal
 
 from bf_duster.repo import BitfinexRepo
 from bf_duster.rest_client import RestClient
 from bf_duster.settings import Settings
 from bf_duster.steps import process_all
-from argparse import ArgumentParser
-from decimal import Decimal
 
 logging.basicConfig(level=logging.WARNING)
 
 
 def main():
-
     parser = ArgumentParser()
     parser.add_argument(
         '--max-value-usd',
